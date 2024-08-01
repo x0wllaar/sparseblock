@@ -1,0 +1,110 @@
+***SPARSEBD***
+
+A very simple NBD server that uses a large number of small files as backing
+storage.
+
+**Why?**
+
+Cloud storage is cool: it's reliable, cheap, easy to use, almost always
+available (as long as you're online) and can be easily accessed from
+multiple computers. However, it's often very bad for a) privacy and b)
+usability as a general storage medium.
+
+Obviously, when you upload something to e.g. Google Drive, Google gets to
+read your stuff, and while I mostly don't care, I'd like to have a way to
+store stuff for my eyes only. At the same time, these cloud storages often
+don't support UNIX permission bits, symlinks, and other useful filesystem
+stuff that I'd like to have.
+
+One way around this might be using a file-based encryption solution
+(Cryptomator or CryFS), but they tend to be clunky and still lack FS
+feature support. You can also just try putting a 64GB VeraCrypt or LUKS
+container into the cloud, but differential sync support is not so good, so
+good luck reuploading 64GB of data on every file operation.
+
+This program allows you to create a block device that is backed by a large
+number of small files, that are dynamically allocated (so you don't fill
+yout storage all at once), and that naturally support differential sync, as
+every operation will only touch a small subset of files. You can then put
+LUKS and whatever filesystem you want onto the block device, and enjoy
+good, feature-rich, private cloud storage.
+
+**Limitations**
+
+This is in a very early stage, don't trust it with any important files.
+
+Block-based disk encryption methods are also typically not designed with
+the cloud in mind, and use encryption methods such as XTS, which are
+malleable and don't protect against evil maids, see
+https://security.stackexchange.com/a/153252 and
+https://sockpuppet.org/blog/2014/04/30/you-dont-want-xts/ for an example of
+this. It's up to you to decide whether this is in your threat model. Just
+be aware that it WILL leak some information to the cloud provider and allow
+them to tamper with the data in predictable ways. 
+
+Obviously, don't mount the device on 2 machines at once, this will break
+filesystems and result in data loss. In general, watch out for syncing and
+mount only on a single machine at a time once everything is fully synced.
+
+Know what you're doing!
+
+**Usage**
+
+0. Clone and build the server
+
+1. Determine the maximum size of the block device. Then choose the backing
+file size (default is 32KB) and the directory tree structure. The total
+size of the device is the total number of leaves in the tree * the size of
+the file. The default tree structure is 64,64,32 which means that it will
+create up to 64 directories, then 64 more directories inside them and then
+up to 32 files in each of these directories (64*64*32 files in total). This
+means that the size of the block device will be 64*64*32*32768 bytes, or
+4GB. I recommend increasing the tree size to add more space, as it will aid
+with differential syncing.
+
+2. Start the server. Check the -h page of the server for options (and how
+to specify the tree structure and file size)
+
+3. Install the NBD package and load the kernel module (on Ubuntu: 
+
+apt install nbd; modprobe nbd
+
+). Check that you have NBD devices in /dev (
+ls /dev/nbd*
+)
+
+4. Connect to the server: 
+
+nbd-client -N "sparsebd" 127.0.0.1 11114 /dev/nbd0 
+
+will connect the server on 127.0.0.1:11114 to /dev/nbd0/. Make
+sure that the export name and address match on the client and the server.
+
+5. You can now do whatever you want with /dev/nbd0. For example, to setup
+XFS on LVM on LUKS: 
+
+cryptsetup luksFormat /dev/nbd0
+cryptsetup luksOpen /dev/nbd0 sparsebdcrypt
+pvcreate /dev/mapper/sparsebdcrypt
+vgcreate SparseBDVG /dev/mapper/sparsebdcrypt 
+lvcreate -l 100%FREE SparseBDVG -n SparseBDFS 
+mkfs.xfs /dev/SparseBDVG/SparseBDFS. 
+
+XFS is recommended as it
+maximizes reuse of allocated blocks, thus slowing down the growth of the
+storage as you delete and add new files. Please note that XFS cannot be
+shrunk, but can be grown while mounted, so creating a smaller logical
+volume and then growing it as needed might be a useful strategy.
+
+6. To disconnect from the device, unmount all filesystems, stop all LVM
+volume groups using the device (
+
+vgchange -a n SparseBDVG, 
+
+remember to
+
+vgchange -a y SparseBDVG 
+
+when mounting again), close LUKS, and then disconnect the NBD: nbd-client -d /dev/nbd0
+
+)
